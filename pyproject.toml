@@ -1,0 +1,30 @@
+[project]
+name = "onbot-cli"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "onpprod",email = "otavionpproducoes@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "typer (>=0.25.0,<0.26.0)",
+    "rich (>=15.0.0,<16.0.0)",
+    "prompt-toolkit (>=3.0.52,<4.0.0)",
+    "pyyaml (>=6.0.3,<7.0.0)"
+]
+
+[project.scripts]
+onbot-cli = "onbot_cli.cli:app"
+
+[tool.poetry]
+packages = [{include = "onbot_cli", from = "src"}]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "pytest (>=9.0.3,<10.0.0)"
+]

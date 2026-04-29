@@ -1,0 +1,1 @@
+"""Fronteira da integracao Git."""

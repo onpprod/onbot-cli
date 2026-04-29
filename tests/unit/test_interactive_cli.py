@@ -64,7 +64,8 @@ def test_internal_commands_render_core_state(tmp_path: Path) -> None:
     assert "Status" in rendered
     assert "Permissoes" in rendered
     assert "default" in rendered
-    assert "Tool Registry sera implementado" in rendered
+    assert "list_files" in rendered
+    assert "read_file" in rendered
 
 
 def test_mode_and_permissions_commands_mutate_session_rules(tmp_path: Path) -> None:

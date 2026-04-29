@@ -29,7 +29,7 @@ poetry run pytest
 
 ## Estado atual
 
-A etapa 03 entrega a CLI interativa inicial: bootstrap do workspace local,
-persistencia em `.onbot-cli`, loop continuo com `prompt_toolkit`, autocomplete
-para slash commands, comandos internos minimos, renderizacao com Rich,
-cancelamento local e registro de prompts/comandos no historico e na sessao.
+A etapa 05 entrega o nucleo seguro de tools internas: catalogo `/tools`,
+contratos de tool, listagem, leitura, busca textual, resumo estrutural com
+cache, selecao de contexto, aplicacao controlada de patches, auditoria,
+permissoes e interfaces iniciais para hooks.

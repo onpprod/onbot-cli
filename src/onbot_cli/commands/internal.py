@@ -21,6 +21,7 @@ from onbot_cli.security.permissions import (
     PermissionManagerError,
     PermissionRule,
 )
+from onbot_cli.tools import create_internal_tool_registry
 
 
 SUPPORTED_MODES = tuple(mode.value for mode in ExecutionMode)
@@ -209,18 +210,23 @@ def _tools(context: CommandContext, args: Sequence[str]) -> CommandResult:
     if args:
         raise CommandError("Uso invalido.", hint="Use /tools sem argumentos.")
 
-    config = _section(context.config, "tools")
-    paths = _list_value(config.get("paths"))
-    enabled = _list_value(config.get("enabled"))
-    disabled = _list_value(config.get("disabled"))
-
+    registry = create_internal_tool_registry(context.config)
     rows = [
-        ("registry", "stub", "Tool Registry sera implementado na etapa 05."),
-        ("paths", ", ".join(paths) or "-", "Diretorios configurados."),
-        ("enabled", ", ".join(enabled) or "-", "Lista permitida por config."),
-        ("disabled", ", ".join(disabled) or "-", "Lista bloqueada por config."),
+        (
+            entry.name,
+            entry.description,
+            entry.origin,
+            entry.risk_level,
+            _schema_summary(entry.input_schema),
+            "habilitada" if entry.enabled else "desabilitada",
+        )
+        for entry in registry.list_tools(include_disabled=True)
     ]
-    context.renderer.table("Tools", ("Item", "Valor", "Contrato"), rows)
+    context.renderer.table(
+        "Tools",
+        ("Nome", "Descricao", "Origem", "Risco", "Entradas", "Status"),
+        rows,
+    )
     return CommandResult(name="tools")
 
 
@@ -405,6 +411,22 @@ def _list_value(value: Any) -> list[Any]:
     if value is None:
         return []
     return [value]
+
+
+def _schema_summary(schema: Mapping[str, Any]) -> str:
+    properties = schema.get("properties", {})
+    required = set(schema.get("required", ()))
+    if not isinstance(properties, Mapping) or not properties:
+        return "-"
+
+    parts: list[str] = []
+    for name, definition in properties.items():
+        suffix = "*" if name in required else ""
+        if isinstance(definition, Mapping):
+            parts.append(f"{name}{suffix}:{definition.get('type', 'any')}")
+        else:
+            parts.append(f"{name}{suffix}:any")
+    return ", ".join(parts)
 
 
 def _git_dir(workspace: Path) -> Path:

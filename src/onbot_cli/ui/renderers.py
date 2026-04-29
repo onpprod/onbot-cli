@@ -67,6 +67,15 @@ class TerminalRenderer:
     def panel(self, title: str, body: str, *, style: str = "cyan") -> None:
         self.console.print(Panel(body, title=title, border_style=style, expand=False))
 
+    def stream_start(self, title: str = "Agente") -> None:
+        self.console.print(f"[bold]{title}:[/bold] ", end="")
+
+    def stream_chunk(self, chunk: str) -> None:
+        self.console.print(chunk, end="", soft_wrap=True)
+
+    def stream_end(self) -> None:
+        self.console.print()
+
     def config(self, config: Mapping[str, Any], *, section: str | None = None) -> None:
         value: Any
         if section is None:

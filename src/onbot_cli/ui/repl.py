@@ -9,6 +9,7 @@ from typing import Protocol
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 
+from onbot_cli.agent.controller import AgentController
 from onbot_cli.app import BootstrapResult
 from onbot_cli.commands.internal import discover_custom_command_names
 from onbot_cli.commands.router import CommandContext, CommandRouter
@@ -50,6 +51,7 @@ class InteractiveShell:
         version: str,
         prompt_input: PromptInput | None = None,
         agent_stub: Callable[[str], str] | None = None,
+        agent_controller: AgentController | None = None,
     ) -> None:
         self.bootstrap = bootstrap
         self.router = router
@@ -59,7 +61,10 @@ class InteractiveShell:
         self.history = CommandHistory(bootstrap.layout)
         self.audit_logger = AuditLogger(bootstrap.layout)
         self.prompt_input = prompt_input or self._create_prompt_input()
-        self.agent_stub = agent_stub or self._default_agent_stub
+        self.agent_stub = agent_stub
+        self.agent_controller = agent_controller or AgentController.from_bootstrap(
+            bootstrap
+        )
         self._closed = False
 
     def run(self) -> None:
@@ -161,16 +166,38 @@ class InteractiveShell:
         )
 
     def _handle_agent_prompt(self, text: str) -> None:
-        message = self.agent_stub(text)
-        self.renderer.panel("Agente", message, style="green")
-        self.session_store.append_action(
-            self.bootstrap.session_id,
-            ActionRecord(
-                type="agent_prompt",
-                status="stub",
-                detail={"message": message},
-            ),
+        if self.agent_stub is not None:
+            message = self.agent_stub(text)
+            self.renderer.panel("Agente", message, style="green")
+            self.session_store.append_action(
+                self.bootstrap.session_id,
+                ActionRecord(
+                    type="agent_prompt",
+                    status="stub",
+                    detail={"message": message},
+                ),
+            )
+            return
+
+        stream_started = False
+
+        def stream_chunk(chunk: str) -> None:
+            nonlocal stream_started
+            if not stream_started:
+                self.renderer.stream_start("Agente")
+                stream_started = True
+            self.renderer.stream_chunk(chunk)
+
+        result = self.agent_controller.run(
+            text,
+            stream_callback=stream_chunk,
+            plan_callback=self.renderer.plan,
         )
+        if stream_started:
+            self.renderer.stream_end()
+        else:
+            style = "red" if result.status.endswith("error") else "green"
+            self.renderer.panel("Agente", result.content, style=style)
 
     def _command_context(self) -> CommandContext:
         return CommandContext(

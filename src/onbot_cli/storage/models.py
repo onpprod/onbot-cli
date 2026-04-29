@@ -107,6 +107,7 @@ class SessionRecord:
     git_operations: list[dict[str, Any]] = field(default_factory=list)
     permission_decisions: list[dict[str, Any]] = field(default_factory=list)
     hooks: list[dict[str, Any]] = field(default_factory=list)
+    pending_interactions: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def create(cls, session_id: str) -> "SessionRecord":
@@ -126,6 +127,7 @@ class SessionRecord:
             git_operations=list(data.get("git_operations", [])),
             permission_decisions=list(data.get("permission_decisions", [])),
             hooks=list(data.get("hooks", [])),
+            pending_interactions=list(data.get("pending_interactions", [])),
         )
 
     def touch(self) -> None:

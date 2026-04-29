@@ -3,20 +3,36 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from onbot_cli.agent.context import ContextBundle, ContextManager
+from onbot_cli.agent.file_actions import (
+    AgentActionPlan,
+    FileActionApplyResult,
+    FileActionExecutor,
+    StaticApprovalService,
+    parse_action_plan,
+)
 from onbot_cli.agent.messages import AgentMessage
 from onbot_cli.agent.planner import Plan, Planner
+from onbot_cli.agent.state import (
+    AgentTurnStatus,
+    ConversationStateManager,
+    PendingInteraction,
+    PendingInteractionStatus,
+    PendingInteractionType,
+    classify_pending_response,
+    is_short_confirmation_without_pending,
+)
 from onbot_cli.agent.workflows import WorkflowEngine, WorkflowRunResult
 from onbot_cli.app import BootstrapResult
 from onbot_cli.errors import ApplicationError
 from onbot_cli.llm import (
     LLMCancelledError,
     LLMClient,
-    LLMConfigurationError,
     LLMError,
     LLMRequest,
     OpenAICompatibleClient,
@@ -25,6 +41,7 @@ from onbot_cli.llm import (
 from onbot_cli.models import ApplicationContext
 from onbot_cli.security.paths import PathGuard
 from onbot_cli.security.permissions import PermissionManager
+from onbot_cli.security.redaction import redact_data
 from onbot_cli.storage.logs import AuditLogger
 from onbot_cli.storage.models import ActionRecord, MessageRecord
 from onbot_cli.storage.sessions import SessionStore
@@ -55,6 +72,17 @@ class AgentTurnResult:
     steps_taken: int = 0
     streamed: bool = False
     error: str | None = None
+    pending_interaction: PendingInteraction | None = None
+    file_action_result: FileActionApplyResult | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LLMTurnOutput:
+    """Saida completa do LLM apos parsing de acoes estruturadas."""
+
+    content: str
+    streamed: bool = False
+    action_plan: AgentActionPlan | None = None
 
 
 StreamCallback = Callable[[str], None]
@@ -88,6 +116,10 @@ class AgentController:
         self.session_store = session_store or SessionStore(layout)
         self.audit_logger = audit_logger or AuditLogger(layout)
         self.context_manager = ContextManager(layout, config)
+        self.state_manager = ConversationStateManager(
+            self.session_store,
+            app_context.session_id,
+        )
         self._steps_taken = 0
 
     @classmethod
@@ -117,6 +149,51 @@ class AgentController:
         plan: Plan | None = None
         workflow_result: WorkflowRunResult | None = None
         streamed = False
+        pending_interaction: PendingInteraction | None = None
+        file_action_result: FileActionApplyResult | None = None
+
+        pending = self.state_manager.active_pending()
+        if pending is not None:
+            try:
+                result = self._handle_pending_response(pending, prompt)
+            except ApplicationError as exc:
+                content = f"Falha ao processar acao pendente: {exc.message}"
+                if exc.hint:
+                    content = f"{content}\n{exc.hint}"
+                self._record_action(
+                    "pending_interaction",
+                    "failed",
+                    target=pending.id,
+                    detail={"error": exc.message, "hint": exc.hint},
+                )
+                result = AgentTurnResult(
+                    status=AgentTurnStatus.FAILED.value,
+                    content=content,
+                    pending_interaction=pending,
+                    error=exc.message,
+                )
+            self._record_assistant_message(result.content, status=result.status)
+            return result
+
+        if is_short_confirmation_without_pending(prompt):
+            content = (
+                "Nao ha nenhuma acao pendente para confirmar. "
+                "Descreva a tarefa que deseja executar."
+            )
+            self._record_action(
+                "agent_turn",
+                "clarification_required",
+                detail={"input": prompt, "reason": "short_confirmation_without_pending"},
+            )
+            self._record_assistant_message(
+                content,
+                status="clarification_required",
+            )
+            return AgentTurnResult(
+                status="clarification_required",
+                content=content,
+                steps_taken=self._steps_taken,
+            )
 
         try:
             self._enter_step("select_workflow")
@@ -157,14 +234,30 @@ class AgentController:
             )
 
             self._enter_step("llm")
-            content, streamed = self._respond_with_llm(
+            llm_output = self._respond_with_llm(
                 prompt,
                 context=context,
                 plan=plan,
                 workflow_result=workflow_result,
+                recent_messages=self._recent_messages(prompt),
                 stream_callback=stream_callback,
             )
-            status = "completed"
+            streamed = llm_output.streamed
+            if llm_output.action_plan is not None:
+                pending_interaction = self._create_file_action_pending(
+                    llm_output.action_plan,
+                    workflow_name=workflow.name,
+                    step="file_actions",
+                )
+                content = _pending_file_action_message(
+                    llm_output.action_plan,
+                    pending_interaction,
+                    self._file_action_executor().preview(llm_output.action_plan),
+                )
+                status = AgentTurnStatus.AWAITING_CONFIRMATION.value
+            else:
+                content = llm_output.content
+                status = AgentTurnStatus.COMPLETED.value
             error = None
         except AgentStepLimitExceeded as exc:
             content = _max_steps_message(self.max_steps)
@@ -193,6 +286,8 @@ class AgentController:
             steps_taken=self._steps_taken,
             streamed=streamed,
             error=error,
+            pending_interaction=pending_interaction,
+            file_action_result=file_action_result,
         )
 
     @property
@@ -212,16 +307,23 @@ class AgentController:
         context: ContextBundle,
         plan: Plan,
         workflow_result: WorkflowRunResult,
+        recent_messages: Sequence[Mapping[str, Any]],
         stream_callback: StreamCallback | None,
-    ) -> tuple[str, bool]:
+    ) -> LLMTurnOutput:
         if self.llm_client is None and not self.llm_config.configured:
-            return _configuration_fallback(self.llm_config), False
+            return LLMTurnOutput(_configuration_fallback(self.llm_config), False)
 
         client = self.llm_client or OpenAICompatibleClient(self.llm_config)
         request = LLMRequest(
             messages=[
                 message.to_llm_dict()
-                for message in _messages_for(prompt, context, plan, workflow_result)
+                for message in _messages_for(
+                    prompt,
+                    context,
+                    plan,
+                    workflow_result,
+                    recent_messages,
+                )
             ],
             model=self.llm_config.model or None,
             temperature=self.llm_config.temperature,
@@ -244,12 +346,18 @@ class AgentController:
             if chunk.content:
                 chunks.append(chunk.content)
                 streamed = True
-                if stream_callback is not None:
-                    stream_callback(chunk.content)
         content = "".join(chunks)
         if not content:
             response = client.complete(request)
             content = response.content
+        action_plan = parse_action_plan(content)
+        if action_plan is None:
+            content = _ground_unapplied_mutation_claims(content)
+            if stream_callback is not None and content:
+                for chunk in chunks or [content]:
+                    stream_callback(chunk)
+        else:
+            content = action_plan.response
 
         self.audit_logger.record_event(
             "llm_response",
@@ -258,10 +366,153 @@ class AgentController:
                 "status": "completed",
                 "streamed": streamed,
                 "content_chars": len(content),
+                "action_count": 0 if action_plan is None else len(action_plan.actions),
             },
             session_id=self.session_id,
         )
-        return content, streamed
+        return LLMTurnOutput(content, streamed, action_plan)
+
+    def _handle_pending_response(
+        self,
+        pending: PendingInteraction,
+        response: str,
+    ) -> AgentTurnResult:
+        decision = classify_pending_response(response)
+        if decision is None:
+            content = (
+                "Existe uma acao pendente aguardando decisao. "
+                "Responda `sim` para aplicar ou `nao` para cancelar.\n\n"
+                f"{pending.prompt}"
+            )
+            self._record_action(
+                "pending_interaction",
+                "awaiting_response",
+                target=pending.id,
+                detail={"response": response},
+            )
+            return AgentTurnResult(
+                status=AgentTurnStatus.AWAITING_CONFIRMATION.value,
+                content=content,
+                pending_interaction=pending,
+            )
+
+        if decision == "reject":
+            resolved = self.state_manager.resolve_pending(
+                pending.id,
+                status=PendingInteractionStatus.CANCELLED,
+                response=response,
+            )
+            content = "Acao pendente cancelada. Nenhuma alteracao foi aplicada."
+            self._record_action(
+                "pending_interaction",
+                "cancelled",
+                target=pending.id,
+                detail={"response": response},
+            )
+            return AgentTurnResult(
+                status=AgentTurnStatus.CANCELLED.value,
+                content=content,
+                pending_interaction=resolved or pending,
+            )
+
+        plan = AgentActionPlan.from_dict(pending.payload.get("action_plan", {}))
+        self._enter_step("apply_pending_file_actions")
+        apply_result = self._file_action_executor().apply(
+            plan,
+            approval_service=StaticApprovalService(
+                approved=True,
+                reason="usuario confirmou interacao pendente",
+            ),
+        )
+        resolved = self.state_manager.resolve_pending(
+            pending.id,
+            status=(
+                PendingInteractionStatus.COMPLETED
+                if apply_result.applied
+                else PendingInteractionStatus.REJECTED
+            ),
+            response=response,
+        )
+        self._record_action(
+            "pending_interaction",
+            "completed" if apply_result.applied else apply_result.status,
+            target=pending.id,
+            detail={
+                "response": response,
+                "results": [item.to_dict() for item in apply_result.results],
+            },
+        )
+        return AgentTurnResult(
+            status=(
+                AgentTurnStatus.COMPLETED.value
+                if apply_result.applied
+                else AgentTurnStatus.FAILED.value
+            ),
+            content=apply_result.summary,
+            steps_taken=self._steps_taken,
+            pending_interaction=resolved or pending,
+            file_action_result=apply_result,
+        )
+
+    def _create_file_action_pending(
+        self,
+        action_plan: AgentActionPlan,
+        *,
+        workflow_name: str,
+        step: str,
+    ) -> PendingInteraction:
+        pending = self.state_manager.create_pending(
+            type=PendingInteractionType.CONFIRMATION,
+            prompt=action_plan.response,
+            workflow=workflow_name,
+            step=step,
+            payload={"action_plan": action_plan.to_dict()},
+            options=["sim", "nao", "cancelar"],
+        )
+        self._record_action(
+            "pending_interaction",
+            "created",
+            target=pending.id,
+            detail={
+                "workflow": workflow_name,
+                "step": step,
+                "action_count": len(action_plan.actions),
+            },
+        )
+        return pending
+
+    def _file_action_executor(self) -> FileActionExecutor:
+        return FileActionExecutor(self._tool_context())
+
+    def _recent_messages(
+        self,
+        current_prompt: str,
+        *,
+        limit: int = 6,
+    ) -> tuple[Mapping[str, Any], ...]:
+        if not self.session_id:
+            return ()
+        try:
+            session = self.session_store.load(self.session_id)
+        except ApplicationError:
+            return ()
+        messages = list(session.messages[-limit:])
+        if messages:
+            last = messages[-1]
+            if (
+                last.get("role") == "user"
+                and str(last.get("content", "")) == current_prompt
+            ):
+                messages = messages[:-1]
+        redacted = redact_data(messages)
+        return tuple(
+            {
+                "role": str(message.get("role", "")),
+                "content": str(message.get("content", ""))[:1200],
+            }
+            for message in redacted
+            if isinstance(message, Mapping)
+        )
 
     def _refresh_summary_with_tool(self) -> None:
         context = self._tool_context()
@@ -369,14 +620,23 @@ def _messages_for(
     context: ContextBundle,
     plan: Plan,
     workflow_result: WorkflowRunResult,
+    recent_messages: Sequence[Mapping[str, Any]] = (),
 ) -> Sequence[AgentMessage]:
     return (
         AgentMessage.system(
             "Voce e o onbot-cli, uma CLI agentica para desenvolvimento local. "
             "Responda em portugues, respeite permissoes, nao invente execucoes "
-            "e nunca exponha segredos deliberadamente."
+            "e nunca exponha segredos deliberadamente. Para criar, editar, mover "
+            "ou excluir arquivos, retorne somente um bloco <onbot-actions> com "
+            "JSON no formato {\"response\": \"resumo\", \"actions\": [...]}. "
+            "Use actions create_file, write_file, edit_file, move_file ou "
+            "delete_file. Para escrita, envie sempre o conteudo completo do "
+            "arquivo em content. Nunca afirme que a alteracao ja foi aplicada; "
+            "o sistema pedira confirmacao e aplicara a acao real."
         ),
-        AgentMessage.system(_context_payload(context, plan, workflow_result)),
+        AgentMessage.system(
+            _context_payload(context, plan, workflow_result, recent_messages)
+        ),
         AgentMessage.user(prompt),
     )
 
@@ -385,6 +645,7 @@ def _context_payload(
     context: ContextBundle,
     plan: Plan,
     workflow_result: WorkflowRunResult,
+    recent_messages: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     summary = dict(context.summary)
     summary["tree"] = list(summary.get("tree", []))[:80]
@@ -402,6 +663,7 @@ def _context_payload(
         "project_summary": summary,
         "context_snippets": snippets,
         "context_truncated": context.truncated,
+        "recent_messages": [dict(item) for item in recent_messages],
         "plan": plan.to_dict(),
         "workflow": workflow_result.to_dict(),
     }
@@ -423,6 +685,75 @@ def _configuration_fallback(config: OpenAICompatibleConfig) -> str:
         "Plano estruturado preparado, mas a chave de API do provedor nao foi "
         f"encontrada. Defina a variavel de ambiente `{config.api_key_env}`."
     )
+
+
+def _pending_file_action_message(
+    action_plan: AgentActionPlan,
+    pending: PendingInteraction,
+    preview: str,
+) -> str:
+    lines = [
+        action_plan.response or "O modelo propos alteracoes em arquivos.",
+        "",
+        "Alteracoes pendentes de confirmacao:",
+    ]
+    for action in action_plan.actions:
+        if action.type in {"create_file", "write_file", "edit_file"}:
+            lines.append(f"- {action.type}: {action.path}")
+        elif action.type == "delete_file":
+            lines.append(f"- delete_file: {action.path}")
+        elif action.type == "move_file":
+            lines.append(f"- move_file: {action.source} -> {action.destination}")
+    if preview:
+        lines.extend(["", "Previa:", preview])
+    lines.extend(
+        [
+            "",
+            f"Pendencia: {pending.id}",
+            "Responda `sim` para aplicar as alteracoes reais ou `nao` para cancelar.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _ground_unapplied_mutation_claims(content: str) -> str:
+    if not _claims_workspace_mutation(content):
+        return content
+    return (
+        "Nenhuma alteracao foi aplicada pelo onbot-cli neste turno. "
+        "A resposta abaixo deve ser tratada como proposta do modelo, nao como "
+        "execucao concluida.\n\n"
+        f"{content}"
+    )
+
+
+def _claims_workspace_mutation(content: str) -> bool:
+    normalized = _normalize_claim_text(content)
+    claim_markers = (
+        "arquivo criado",
+        "novo arquivo criado",
+        "foi criado",
+        "criei ",
+        "criado:",
+        "conteudo:",
+        "implementei",
+        "foi implementado",
+        "alterei ",
+        "modifiquei ",
+        "escrevi ",
+        "salvei ",
+        "pagina esta pronta",
+    )
+    return any(marker in normalized for marker in claim_markers)
+
+
+def _normalize_claim_text(content: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", content)
+    return "".join(
+        character
+        for character in decomposed
+        if not unicodedata.combining(character)
+    ).lower()
 
 
 def _max_steps_message(max_steps: int) -> str:

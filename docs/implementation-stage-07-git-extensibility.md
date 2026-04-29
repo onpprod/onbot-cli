@@ -11,6 +11,10 @@ slash customizados.
 Inclui `Git Service`, `Tool Loader`, `Hook Manager`, `Custom Command Manager` e
 integracao desses componentes ao agente, permissoes, auditoria e UI.
 
+Pressupoe a etapa 06B concluida: operacoes mutaveis, hooks, tools locais e
+comandos customizados devem usar confirmacoes estruturadas e pendencias do
+Agent Controller, sem prompts de autorizacao em texto livre gerados pelo LLM.
+
 ## Tarefas
 
 | ID | Tarefa | Entrega | Requisitos |
@@ -32,6 +36,7 @@ integracao desses componentes ao agente, permissoes, auditoria e UI.
 | E07-T15 | Implementar expansao de template. | Substituir argumentos e gerar prompt/workflow reutilizavel. | RF32 |
 | E07-T16 | Integrar `/commands` e autocomplete. | Listar comandos customizados e sugerir nomes no prompt. | RF03, RF32 |
 | E07-T17 | Conectar extensoes ao agente. | Tools locais, hooks e comandos customizados passam pelo fluxo de permissao, auditoria e contexto. | RF19, RF25, RF28, RF31, RF32 |
+| E07-T18 | Reusar pendencias para operacoes mutaveis. | Git, hooks, tools locais e comandos customizados usam `ApprovalService` e estado pendente quando aguardam decisao do usuario. | RF18, RF19, RF33 |
 
 ## Criterios de aceite
 
@@ -42,6 +47,8 @@ integracao desses componentes ao agente, permissoes, auditoria e UI.
 * Hooks sao executados nos eventos suportados e recebem payload estruturado.
 * Comandos customizados aparecem em `/commands` e no autocomplete.
 * Um comando customizado pode expandir prompt e acionar workflow.
+* Confirmacoes de acoes mutaveis retomam a operacao pendente, nao criam nova
+  conversa.
 
 ## Testes recomendados
 
@@ -51,6 +58,7 @@ integracao desses componentes ao agente, permissoes, auditoria e UI.
 * Manifesto YAML com schema incorreto.
 * Hook com sucesso, falha e resposta estruturada.
 * Comando customizado com argumento obrigatorio, ausente e template expandido.
+* Operacao Git mutavel aguardando confirmacao e retomada por `sim`.
 
 ## Riscos
 
@@ -59,4 +67,4 @@ integracao desses componentes ao agente, permissoes, auditoria e UI.
 * Deixar chamadas Git espalhadas pelo agente em vez de centralizar no
   `Git Service`.
 * Permitir que comandos customizados ignorem workflows, permissoes ou auditoria.
-
+* Reintroduzir confirmacoes em texto livre fora do estado pendente do agente.

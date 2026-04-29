@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.console import Console
 
 from onbot_cli.agent.context import ContextBundle, ContextSnippet
 from onbot_cli.agent.controller import AgentController
@@ -12,6 +14,7 @@ from onbot_cli.agent.messages import AgentMessage, AgentToolCall
 from onbot_cli.agent.planner import Planner
 from onbot_cli.agent.workflows import WorkflowEngine
 from onbot_cli.app import bootstrap_application
+from onbot_cli.commands.internal import create_default_router
 from onbot_cli.llm import (
     LLMConfigurationError,
     LLMRequest,
@@ -21,6 +24,8 @@ from onbot_cli.llm import (
     OpenAICompatibleConfig,
 )
 from onbot_cli.storage.sessions import SessionStore
+from onbot_cli.ui.renderers import TerminalRenderer
+from onbot_cli.ui.repl import InteractiveShell
 
 
 class FakeStreamingResponse:
@@ -50,6 +55,16 @@ class FakeLLM:
     def complete(self, request: LLMRequest) -> LLMResponse:
         self.complete_calls += 1
         return LLMResponse(content="fallback completo")
+
+
+class FakePromptInput:
+    def __init__(self, values: list[str]) -> None:
+        self.values = list(values)
+
+    def prompt(self, message: str) -> str:
+        if not self.values:
+            raise EOFError
+        return self.values.pop(0)
 
 
 def test_openai_compatible_client_streams_sse_and_uses_env_key(
@@ -161,6 +176,8 @@ def test_planner_and_workflow_engine_create_structured_development_paths() -> No
     )
 
     assert workflow.name == "bugfix"
+    assert result.status == "planned"
+    assert {step.status for step in result.step_results} == {"planned"}
     assert [step.step_id for step in result.step_results] == [
         "collect",
         "locate",
@@ -207,6 +224,180 @@ def test_agent_controller_builds_context_invokes_tool_streams_and_persists(
     assert session.messages[-1]["role"] == "assistant"
     assert session.messages[-1]["content"] == "ola mundo"
     assert fake_llm.requests[0].messages[0]["role"] == "system"
+
+
+def test_agent_controller_does_not_present_unapplied_file_claim_as_execution(
+    tmp_path: Path,
+) -> None:
+    bootstrap = bootstrap_application(tmp_path)
+    fake_llm = FakeLLM(
+        [
+            "1. **Novo Arquivo Criado:** `index.html`.\n",
+            "2. **Conteúdo:** HTML basico foi escrito.\n",
+            "A pagina esta pronta.",
+        ]
+    )
+    controller = AgentController.from_bootstrap(bootstrap, llm_client=fake_llm)
+
+    result = controller.run("crie uma landing page em index.html")
+    session = SessionStore(bootstrap.layout).load(bootstrap.session_id)
+
+    assert result.status == "completed"
+    assert result.content.startswith("Nenhuma alteracao foi aplicada")
+    assert "nao como execucao concluida" in result.content
+    assert not (tmp_path / "index.html").exists()
+    assert session.messages[-1]["content"] == result.content
+
+
+def test_agent_controller_creates_pending_file_action_and_applies_after_yes(
+    tmp_path: Path,
+) -> None:
+    action_payload = {
+        "response": "Vou criar o arquivo solicitado apos sua confirmacao.",
+        "actions": [
+            {
+                "type": "create_file",
+                "path": "index.html",
+                "content": "<!doctype html>\n<title>Portfolio</title>\n",
+            }
+        ],
+    }
+    bootstrap = bootstrap_application(tmp_path)
+    fake_llm = FakeLLM(
+        [f"<onbot-actions>{json.dumps(action_payload)}</onbot-actions>"]
+    )
+    controller = AgentController.from_bootstrap(bootstrap, llm_client=fake_llm)
+
+    proposed = controller.run("crie index.html")
+    session_after_proposal = SessionStore(bootstrap.layout).load(bootstrap.session_id)
+    target = tmp_path / "index.html"
+    exists_before_confirmation = target.exists()
+    applied = controller.run("sim")
+    session_after_apply = SessionStore(bootstrap.layout).load(bootstrap.session_id)
+
+    assert proposed.status == "awaiting_confirmation"
+    assert "Responda `sim`" in proposed.content
+    assert not exists_before_confirmation
+    assert session_after_proposal.pending_interactions[-1]["status"] == "pending"
+    assert applied.status == "completed"
+    assert target.read_text(encoding="utf-8") == "<!doctype html>\n<title>Portfolio</title>\n"
+    assert session_after_apply.pending_interactions[-1]["status"] == "completed"
+    assert "create_file" in applied.content or "write_file" in applied.content
+
+
+def test_agent_controller_can_edit_move_and_delete_real_files_after_confirmation(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "edit_me.txt").write_text("old\n", encoding="utf-8")
+    (tmp_path / "delete_me.txt").write_text("remove\n", encoding="utf-8")
+    action_payload = {
+        "response": "Vou editar, mover e excluir os arquivos apos confirmacao.",
+        "actions": [
+            {
+                "type": "edit_file",
+                "path": "edit_me.txt",
+                "content": "new\n",
+            },
+            {
+                "type": "move_file",
+                "source": "edit_me.txt",
+                "destination": "moved.txt",
+            },
+            {
+                "type": "delete_file",
+                "path": "delete_me.txt",
+            },
+        ],
+    }
+    bootstrap = bootstrap_application(tmp_path)
+    fake_llm = FakeLLM(
+        [f"```json\n{json.dumps(action_payload)}\n```"]
+    )
+    controller = AgentController.from_bootstrap(bootstrap, llm_client=fake_llm)
+
+    proposed = controller.run("altere os arquivos")
+    applied = controller.run("sim")
+
+    assert proposed.status == "awaiting_confirmation"
+    assert applied.status == "completed"
+    assert not (tmp_path / "edit_me.txt").exists()
+    assert (tmp_path / "moved.txt").read_text(encoding="utf-8") == "new\n"
+    assert not (tmp_path / "delete_me.txt").exists()
+    assert applied.file_action_result is not None
+    assert {result.action for result in applied.file_action_result.results} == {
+        "write_file",
+        "move_file",
+        "delete_file",
+    }
+
+
+def test_agent_controller_cancels_pending_file_action_after_no(tmp_path: Path) -> None:
+    action_payload = {
+        "response": "Vou criar o arquivo apos confirmacao.",
+        "actions": [
+            {"type": "create_file", "path": "cancelled.txt", "content": "nope\n"}
+        ],
+    }
+    bootstrap = bootstrap_application(tmp_path)
+    fake_llm = FakeLLM(
+        [f"<onbot-actions>{json.dumps(action_payload)}</onbot-actions>"]
+    )
+    controller = AgentController.from_bootstrap(bootstrap, llm_client=fake_llm)
+
+    proposed = controller.run("crie cancelled.txt")
+    cancelled = controller.run("nao")
+    session = SessionStore(bootstrap.layout).load(bootstrap.session_id)
+
+    assert proposed.status == "awaiting_confirmation"
+    assert cancelled.status == "cancelled"
+    assert not (tmp_path / "cancelled.txt").exists()
+    assert session.pending_interactions[-1]["status"] == "cancelled"
+
+
+def test_agent_controller_does_not_treat_yes_without_pending_as_new_task(
+    tmp_path: Path,
+) -> None:
+    bootstrap = bootstrap_application(tmp_path)
+    fake_llm = FakeLLM()
+    controller = AgentController.from_bootstrap(bootstrap, llm_client=fake_llm)
+
+    result = controller.run("sim")
+
+    assert result.status == "clarification_required"
+    assert "Nao ha nenhuma acao pendente" in result.content
+    assert fake_llm.requests == []
+
+
+def test_interactive_shell_routes_yes_to_pending_file_action(tmp_path: Path) -> None:
+    action_payload = {
+        "response": "Vou criar o arquivo apos confirmacao.",
+        "actions": [
+            {"type": "create_file", "path": "shell.txt", "content": "ok\n"}
+        ],
+    }
+    bootstrap = bootstrap_application(tmp_path)
+    fake_llm = FakeLLM(
+        [f"<onbot-actions>{json.dumps(action_payload)}</onbot-actions>"]
+    )
+    output = StringIO()
+    renderer = TerminalRenderer(Console(file=output, color_system=None, width=120))
+    controller = AgentController.from_bootstrap(bootstrap, llm_client=fake_llm)
+    shell = InteractiveShell(
+        bootstrap,
+        create_default_router(),
+        renderer,
+        version="0.1.0",
+        prompt_input=FakePromptInput(["crie shell.txt", "sim", "/exit"]),
+        agent_controller=controller,
+    )
+
+    shell.run()
+
+    assert (tmp_path / "shell.txt").read_text(encoding="utf-8") == "ok\n"
+    assert len(fake_llm.requests) == 1
+    rendered = output.getvalue()
+    assert "Alteracoes pendentes de confirmacao" in rendered
+    assert "Alteracoes aplicadas" in rendered
 
 
 def test_agent_controller_returns_clear_fallback_when_llm_is_not_configured(

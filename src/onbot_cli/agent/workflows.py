@@ -47,7 +47,7 @@ class WorkflowStepResult:
 
     step_id: str
     title: str
-    status: str = "completed"
+    status: str = "planned"
     output: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -65,7 +65,7 @@ class WorkflowRunResult:
 
     workflow: Workflow
     step_results: Sequence[WorkflowStepResult]
-    status: str = "completed"
+    status: str = "planned"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -118,7 +118,7 @@ class WorkflowEngine:
         results: list[WorkflowStepResult] = []
         for step in selected.steps:
             if progress_callback is not None:
-                progress_callback(step, "running")
+                progress_callback(step, "planned")
             output = {
                 "objective": objective,
                 "instruction": step.description,
@@ -126,12 +126,10 @@ class WorkflowEngine:
             result = WorkflowStepResult(
                 step_id=step.id,
                 title=step.title,
-                status="completed",
+                status="planned",
                 output=output,
             )
             results.append(result)
-            if progress_callback is not None:
-                progress_callback(step, result.status)
         return WorkflowRunResult(workflow=selected, step_results=tuple(results))
 
 

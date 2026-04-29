@@ -11,7 +11,9 @@ Inclui `LLM Client`, `Agent Controller`, `Planner`, modelos de mensagem e
 `Workflow Engine`.
 
 Nao inclui ainda Git completo, hooks reais, tools Python locais ou comandos
-customizados carregados do workspace.
+customizados carregados do workspace. A continuidade conversacional completa,
+incluindo confirmacoes pendentes e retomada de workflows apos respostas como
+`sim` ou `nao`, fica na etapa 06B.
 
 ## Tarefas
 
@@ -32,6 +34,7 @@ customizados carregados do workspace.
 | E06-T13 | Criar workflow de revisao de codigo. | Inspecionar diff/codigo, apontar riscos e sugerir validacoes. | RF30 |
 | E06-T14 | Criar workflow de preparacao de commit inicial. | Preparar mensagem e resumo usando status/diff quando Git estiver disponivel. | RF30 |
 | E06-T15 | Integrar streaming na UI. | Renderizacao incremental da resposta do modelo. | RF05, RNF14 |
+| E06-T16 | Preparar ponto de extensao para estado de turno. | Contratos do controller permitem evoluir para pendencias e retomada sem reescrever LLM/workflows. | RF06, RF19, RF33 |
 
 ## Criterios de aceite
 
@@ -41,6 +44,8 @@ customizados carregados do workspace.
 * Antes de acoes relevantes, um plano estruturado e produzido.
 * O limite maximo de passos impede loops indefinidos.
 * Workflows minimos existem e podem ser acionados internamente.
+* Perguntas de confirmacao emitidas pelo LLM ainda nao concedem permissao nem
+  retomam workflow por si so; esse comportamento e fechado na etapa 06B.
 
 ## Testes recomendados
 
@@ -50,6 +55,7 @@ customizados carregados do workspace.
 * Planner com entradas representativas.
 * Workflow Engine executando etapas em ordem e registrando progresso.
 * Interrupcao por `max_steps`.
+* Regressao documentada para resposta curta `sim` antes da etapa 06B.
 
 ## Riscos
 
@@ -57,4 +63,5 @@ customizados carregados do workspace.
 * Misturar prompt engineering com regras de dominio que deveriam estar em
   codigo testavel.
 * Criar workflows rigidos demais para tarefas reais de desenvolvimento.
-
+* Permitir que uma pergunta textual do modelo seja confundida com uma
+  confirmacao estruturada do sistema.

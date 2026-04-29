@@ -134,9 +134,32 @@ Responsabilidades:
 * coordenar LLM, tools, Git, hooks e workflows;
 * respeitar limite maximo de passos;
 * pedir planejamento antes de acoes relevantes;
+* distinguir novo objetivo de resposta a interacao pendente;
+* pausar, retomar e cancelar workflows quando aguarda confirmacao ou escolha;
+* interpretar acoes estruturadas de arquivo propostas pelo LLM;
+* aplicar criacao, edicao, movimentacao e exclusao de arquivos somente por
+  servicos internos com permissao e auditoria;
 * executar ciclos de tentativa, validacao e correcao;
 * registrar mensagens, acoes e resultados;
 * retornar ao prompt apos conclusao, erro ou cancelamento.
+
+### 4.4.1 Conversation State Manager
+
+Gerencia o estado multi-turn do agente dentro da sessao interativa.
+
+Responsabilidades:
+
+* registrar interacoes pendentes de confirmacao, escolha ou continuidade;
+* interpretar respostas curtas como `sim`, `nao`, `continuar` e `cancelar`
+  apenas quando existe pendencia ativa;
+* expor API para o Agent Controller retomar ou cancelar workflows;
+* limpar pendencias apos conclusao, rejeicao, erro ou expiracao;
+* persistir estado minimo em `Session Store` e registrar decisoes em auditoria;
+* impedir que perguntas em texto livre do LLM substituam `ApprovalService`.
+
+Interacoes pendentes podem carregar acoes estruturadas de arquivo. Ao receber
+confirmacao, o Agent Controller deve aplicar essas acoes por `Patch Service`,
+`Path Guard` e `Permission Manager`, nunca por texto livre do LLM.
 
 ### 4.5 Workflow Engine
 
@@ -149,7 +172,8 @@ Responsabilidades:
   validacao;
 * permitir que comandos customizados chamem workflows;
 * registrar progresso;
-* permitir intervencao do usuario entre etapas.
+* permitir intervencao do usuario entre etapas;
+* pausar e retomar workflows a partir de estado pendente estruturado.
 
 Workflows iniciais:
 
@@ -221,6 +245,10 @@ Responsabilidades:
 * capturar decisao explicita;
 * oferecer opcoes como permitir uma vez, permitir na sessao ou negar;
 * registrar aprovacao ou rejeicao.
+
+Perguntas geradas pelo LLM em texto livre nao sao autorizacao. Acoes mutaveis
+devem passar por `Permission Manager` e `Approval Service`, mesmo quando o texto
+do assistente pede "posso continuar?".
 
 ### 4.11 Path Guard
 
@@ -356,6 +384,7 @@ Responsabilidades:
 
 * criar identificador unico por sessao;
 * gravar mensagens, actions, tool calls, comandos, Git, hooks e permissoes;
+* gravar interacoes pendentes e suas decisoes;
 * permitir consulta por `/history`;
 * manter dados em `.onbot-cli/sessions`.
 
@@ -386,6 +415,7 @@ src/onbot_cli/
   agent/
     __init__.py
     controller.py
+    state.py
     planner.py
     context.py
     workflows.py
@@ -835,11 +865,13 @@ Operacoes destrutivas ou remotas devem passar por `Permission Manager`:
 1. Shell recebe entrada.
 2. Hooks user_prompt_submit podem inspecionar ou enriquecer contexto.
 3. Command Router trata slash commands.
-4. Agent Controller registra mensagem.
-5. Context Manager monta contexto.
-6. LLM Client responde em streaming.
-7. Agent Controller executa tools/workflows conforme necessario.
-8. Session Store e Audit Logger persistem eventos.
+4. Conversation State Manager verifica se a entrada responde a pendencia ativa.
+5. Se for continuacao, Agent Controller retoma, cancela ou ajusta o workflow.
+6. Se for novo objetivo, Agent Controller registra mensagem.
+7. Context Manager monta contexto com historico recente e estado relevante.
+8. LLM Client responde em streaming.
+9. Agent Controller executa tools/workflows conforme necessario.
+10. Session Store e Audit Logger persistem eventos e pendencias.
 ```
 
 ### 13.3 Invocacao de Tool
@@ -1007,6 +1039,7 @@ Testes recomendados:
 | RF30 | Workflow Engine, Planner |
 | RF31 | Hook Manager |
 | RF32 | Custom Command Manager, Command Router |
+| RF33 | Agent Controller, Conversation State Manager, Session Store, Approval Service |
 | RNF01 | Python package under `src/onbot_cli` |
 | RNF02 | Typer, Rich, prompt_toolkit |
 | RNF03 | Path Guard, Command Policy, Git Service |
@@ -1036,10 +1069,11 @@ A implementacao estara alinhada a esta arquitetura quando:
 * suportar hooks;
 * suportar comandos customizados;
 * conduzir workflows de feature, docs, bugfix, refactor e commit;
+* retomar ou cancelar workflows a partir de confirmacoes pendentes;
 * integrar com Git para status, diff, branch e commit;
 * executar comandos com classificacao de risco;
 * aplicar patches conforme permissoes;
 * registrar sessoes, auditoria, hooks, tools, comandos e Git;
 * comunicar-se com provedores OpenAI-compatible via streaming;
 * possuir testes automatizados para permissoes, Git, tools, hooks, comandos e
-  workflows criticos.
+  workflows criticos, incluindo fluxo multi-turn com confirmacao pendente.

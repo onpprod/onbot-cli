@@ -67,6 +67,7 @@ responsavel por aprovar, revisar ou configurar a autonomia das acoes.
 | Comando customizado | Comando slash definido pelo usuario como prompt/template reutilizavel. |
 | Modo de execucao | Politica ativa que define o nivel de autonomia do agente. |
 | Permissao | Regra `allow`, `ask` ou `deny` aplicada a tools, comandos, paths ou operacoes. |
+| Interacao pendente | Estado registrado quando o agente aguarda confirmacao, escolha ou continuidade do usuario antes de retomar um workflow. |
 | LLM | Modelo de linguagem. |
 | Patch | Alteracao proposta em arquivos. |
 | Sandbox logico | Restricao aplicada pelo `onbot-cli` as suas tools internas para manter operacoes dentro do workspace. |
@@ -597,6 +598,41 @@ Exemplos:
 
 ---
 
+## RF33 - Continuidade conversacional e confirmacoes pendentes
+
+O sistema deve diferenciar uma nova tarefa de uma resposta a uma interacao
+pendente.
+
+Quando o agente solicitar confirmacao, escolha ou continuidade, o sistema deve:
+
+* registrar uma interacao pendente com identificador unico;
+* persistir o workflow, etapa atual, payload relevante e opcoes aceitas;
+* interpretar respostas curtas como `sim`, `nao`, `continuar`, `cancelar` ou
+  escolhas numericas como decisao da pendencia ativa;
+* retomar, cancelar ou ajustar o workflow pendente conforme a decisao;
+* limpar a pendencia apos conclusao, cancelamento, erro ou expiracao;
+* registrar pergunta, resposta e decisao em sessao e auditoria;
+* incluir historico recente e estado pendente no contexto do proximo turno de
+  forma limitada e com redacao de segredos.
+* aplicar acoes estruturadas de arquivo, como criar, editar, mover e excluir,
+  somente depois de confirmacao e avaliacao de permissao.
+
+Se nao houver interacao pendente ativa, respostas curtas como `sim` ou `nao` nao
+devem ser interpretadas automaticamente como objetivo amplo para novo workflow.
+O sistema deve pedir esclarecimento ou tratar a entrada como prompt comum de
+forma explicita.
+
+Confirmacoes para acoes mutaveis, como escrita, patch, comando shell, Git, hook
+ou tool de risco, devem passar por `ApprovalService` e `PermissionManager`. Uma
+pergunta gerada em texto livre pelo LLM nao deve conceder permissao nem substituir
+uma aprovacao estruturada.
+
+Para alteracoes de arquivo, o LLM deve produzir uma acao estruturada separada da
+resposta textual. O sistema deve materializar a alteracao apenas por servicos
+internos controlados, como `PatchService`, `PathGuard` e avaliacao de permissao.
+
+---
+
 # 4. Workflows Ideais
 
 ## 4.1 Desenvolvimento de feature
@@ -850,7 +886,8 @@ Comandos executados por tools internas devem:
   "commands": [],
   "git_operations": [],
   "permission_decisions": [],
-  "hooks": []
+  "hooks": [],
+  "pending_interactions": []
 }
 ```
 
@@ -967,6 +1004,8 @@ O sistema sera considerado valido quando:
 * integrar com Git;
 * suportar regras de permissao;
 * suportar modos `plan`, `default`, `accept_edits`, `trusted` e `locked`;
+* retomar ou cancelar workflows a partir de confirmacoes pendentes sem tratar
+  `sim` ou `nao` como nova conversa acidental;
 * suportar hooks;
 * suportar comandos customizados;
 * apoiar workflows de feature, bugfix, refatoracao, documentacao e commit;

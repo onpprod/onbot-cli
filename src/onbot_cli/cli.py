@@ -9,7 +9,10 @@ from rich.console import Console
 
 from onbot_cli import __version__
 from onbot_cli.app import bootstrap_application
+from onbot_cli.commands.internal import create_default_router
 from onbot_cli.errors import ApplicationError
+from onbot_cli.ui.renderers import TerminalRenderer
+from onbot_cli.ui.repl import InteractiveShell
 
 
 app = typer.Typer(
@@ -38,25 +41,24 @@ def main(
         ),
     ] = False,
 ) -> None:
-    """Inicializa a CLI em modo interativo preparado."""
+    """Inicializa a CLI em modo interativo."""
 
     if ctx.invoked_subcommand is not None:
         return
 
     console = Console(color_system=None)
+    renderer = TerminalRenderer(console)
 
     try:
         result = bootstrap_application()
+        shell = InteractiveShell(
+            result,
+            create_default_router(),
+            renderer,
+            version=__version__,
+        )
+        shell.run()
     except ApplicationError as exc:
         message = exc.to_message()
-        console.print(f"[bold red]Erro:[/bold red] {message.message}")
-        if message.hint:
-            console.print(message.hint)
+        renderer.error(message.message, message.hint)
         raise typer.Exit(exc.exit_code) from exc
-
-    console.print(f"[bold]onbot-cli[/bold] {__version__}")
-    console.print(f"Workspace: {result.workspace.root}", soft_wrap=True)
-    console.print(f"Persistencia: {result.layout.onbot_dir}", soft_wrap=True)
-    console.print(f"Sessao: {result.session_id}")
-    console.print(result.message)
-    console.print("Modo interativo: preparado para as proximas etapas.")

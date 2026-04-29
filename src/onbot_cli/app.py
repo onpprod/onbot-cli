@@ -63,7 +63,7 @@ def bootstrap_application(start_path: Path | str | None = None) -> BootstrapResu
         config=config_result.config,
         session_id=session.id,
         metadata={
-            "stage": "workspace-storage",
+            "stage": "interactive-cli",
             "workspace_dir": str(layout.onbot_dir),
             "config_path": str(config_result.local_path),
         },
@@ -73,6 +73,6 @@ def bootstrap_application(start_path: Path | str | None = None) -> BootstrapResu
         layout=layout,
         config=config_result.config,
         session_id=session.id,
-        interactive_ready=False,
-        message="Workspace local e persistencia inicial prontos.",
+        interactive_ready=True,
+        message="Workspace local, persistencia e CLI interativa prontos.",
     )

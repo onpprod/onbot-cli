@@ -29,7 +29,7 @@ poetry run pytest
 
 ## Estado atual
 
-A etapa 02 entrega a persistencia local inicial: criacao idempotente de
-`.onbot-cli`, configuracao local com defaults, leitura opcional de configuracao
-global nao sensivel, sessoes, historico de comandos, auditoria com redacao
-basica de segredos e cache estrutural do projeto.
+A etapa 03 entrega a CLI interativa inicial: bootstrap do workspace local,
+persistencia em `.onbot-cli`, loop continuo com `prompt_toolkit`, autocomplete
+para slash commands, comandos internos minimos, renderizacao com Rich,
+cancelamento local e registro de prompts/comandos no historico e na sessao.

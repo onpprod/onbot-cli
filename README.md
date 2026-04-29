@@ -29,6 +29,7 @@ poetry run pytest
 
 ## Estado atual
 
-A etapa 01 entrega a fundacao do projeto: empacotamento, dependencias base,
-ponto de entrada `onbot-cli`, estrutura modular inicial, bootstrap minimo,
-contratos compartilhados e testes unitarios basicos.
+A etapa 02 entrega a persistencia local inicial: criacao idempotente de
+`.onbot-cli`, configuracao local com defaults, leitura opcional de configuracao
+global nao sensivel, sessoes, historico de comandos, auditoria com redacao
+basica de segredos e cache estrutural do projeto.

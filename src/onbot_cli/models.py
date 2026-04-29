@@ -12,6 +12,10 @@ def _empty_metadata() -> Mapping[str, Any]:
     return MappingProxyType({})
 
 
+def _empty_config() -> Mapping[str, Any]:
+    return MappingProxyType({})
+
+
 @dataclass(frozen=True, slots=True)
 class CommandResult:
     """Resultado padronizado para comandos locais futuros."""
@@ -43,4 +47,6 @@ class ApplicationContext:
     """Contexto minimo compartilhado entre CLI e servicos."""
 
     workspace: Workspace
+    config: Mapping[str, Any] = field(default_factory=_empty_config)
+    session_id: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=_empty_metadata)

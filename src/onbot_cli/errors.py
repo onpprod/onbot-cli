@@ -50,3 +50,9 @@ class ConfigurationError(ApplicationError):
     """Erro relacionado a configuracao da aplicacao."""
 
     code = "configuration_error"
+
+
+class StorageError(ApplicationError):
+    """Erro relacionado a persistencia local da aplicacao."""
+
+    code = "storage_error"

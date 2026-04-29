@@ -56,5 +56,7 @@ def main(
 
     console.print(f"[bold]onbot-cli[/bold] {__version__}")
     console.print(f"Workspace: {result.workspace.root}", soft_wrap=True)
+    console.print(f"Persistencia: {result.layout.onbot_dir}", soft_wrap=True)
+    console.print(f"Sessao: {result.session_id}")
     console.print(result.message)
     console.print("Modo interativo: preparado para as proximas etapas.")

@@ -67,6 +67,28 @@ def test_internal_commands_render_core_state(tmp_path: Path) -> None:
     assert "Tool Registry sera implementado" in rendered
 
 
+def test_mode_and_permissions_commands_mutate_session_rules(tmp_path: Path) -> None:
+    router = create_default_router()
+    context, output, _ = _command_context(tmp_path)
+
+    assert router.dispatch("/mode trusted", context).status == "ok"
+    assert context.config["permissions"]["mode"] == "trusted"
+
+    assert router.dispatch(
+        '/permissions add allow command "poetry run pytest"',
+        context,
+    ).status == "ok"
+    assert context.config["permissions"]["allow"] == [
+        {"action": "command", "target": "poetry run pytest"}
+    ]
+
+    assert router.dispatch("/permissions", context).status == "ok"
+    assert "poetry run pytest" in output.getvalue()
+
+    assert router.dispatch("/permissions remove allow 1", context).status == "ok"
+    assert context.config["permissions"]["allow"] == []
+
+
 def test_config_command_redacts_sensitive_values(tmp_path: Path) -> None:
     router = create_default_router()
     context, output, _ = _command_context(

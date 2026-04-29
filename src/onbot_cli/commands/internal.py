@@ -13,9 +13,17 @@ from onbot_cli.commands.router import (
     CommandRouter,
     CommandSpec,
 )
+from onbot_cli.security.permissions import (
+    ExecutionMode,
+    PermissionAction,
+    PermissionEffect,
+    PermissionManager,
+    PermissionManagerError,
+    PermissionRule,
+)
 
 
-SUPPORTED_MODES = ("plan", "default", "accept_edits", "trusted", "locked")
+SUPPORTED_MODES = tuple(mode.value for mode in ExecutionMode)
 CUSTOM_COMMAND_EXTENSIONS = {".md", ".yaml", ".yml"}
 
 
@@ -72,14 +80,14 @@ def _build_specs() -> tuple[CommandSpec, ...]:
         ),
         CommandSpec(
             name="permissions",
-            summary="Consulta regras e paths protegidos configurados.",
-            usage="/permissions",
+            summary="Consulta e altera regras de permissao da sessao.",
+            usage="/permissions [add|remove|clear] ...",
             handler=_permissions,
         ),
         CommandSpec(
             name="mode",
-            summary="Consulta o modo de execucao ativo.",
-            usage="/mode",
+            summary="Consulta ou altera o modo de execucao ativo.",
+            usage="/mode [plan|default|accept_edits|trusted|locked]",
             handler=_mode,
         ),
         CommandSpec(
@@ -217,35 +225,89 @@ def _tools(context: CommandContext, args: Sequence[str]) -> CommandResult:
 
 
 def _permissions(context: CommandContext, args: Sequence[str]) -> CommandResult:
+    manager = _permission_manager(context)
+
     if args:
-        raise CommandError("Uso invalido.", hint="Use /permissions sem argumentos.")
+        subcommand = args[0].lower()
+        if subcommand == "add":
+            context.renderer.info(_permissions_add(manager, args))
+            return CommandResult(name="permissions")
+        if subcommand == "remove":
+            context.renderer.info(_permissions_remove(manager, args))
+            return CommandResult(name="permissions")
+        if subcommand == "clear":
+            context.renderer.info(_permissions_clear(manager, args))
+            return CommandResult(name="permissions")
+        raise CommandError(
+            "Subcomando de permissoes desconhecido.",
+            hint=(
+                "Use /permissions, /permissions add <allow|ask|deny> "
+                "<acao> [alvo], /permissions remove <efeito> <indice> "
+                "ou /permissions clear <efeito>."
+            ),
+        )
 
     config = _section(context.config, "permissions")
-    rows = [
-        ("mode", str(config.get("mode", "default"))),
-        ("allow", ", ".join(_list_value(config.get("allow"))) or "-"),
-        ("ask", ", ".join(_list_value(config.get("ask"))) or "-"),
-        ("deny", ", ".join(_list_value(config.get("deny"))) or "-"),
-        (
-            "protected_paths",
-            ", ".join(_list_value(config.get("protected_paths"))) or "-",
-        ),
+    rows: list[tuple[str, str, str, str, str]] = [
+        ("mode", "-", manager.mode.value, "-", "modo ativo"),
     ]
-    context.renderer.table("Permissoes", ("Campo", "Valor"), rows)
+    for effect in (
+        PermissionEffect.DENY,
+        PermissionEffect.ASK,
+        PermissionEffect.ALLOW,
+    ):
+        values = _list_value(config.get(effect.value))
+        if not values:
+            rows.append((effect.value, "-", "-", "-", "sem regras"))
+            continue
+        for index, value in enumerate(values, start=1):
+            rule = PermissionRule.from_config(effect, value)
+            rows.append(
+                (
+                    effect.value,
+                    str(index),
+                    str(rule.action),
+                    rule.target,
+                    rule.reason or "-",
+                )
+            )
+    context.renderer.table(
+        "Permissoes",
+        ("Tipo", "Indice", "Acao", "Alvo", "Motivo"),
+        rows,
+    )
+    context.renderer.table(
+        "Paths protegidos",
+        ("Padrao",),
+        ((item,) for item in _list_value(config.get("protected_paths"))),
+    )
     return CommandResult(name="permissions")
 
 
 def _mode(context: CommandContext, args: Sequence[str]) -> CommandResult:
-    if args:
+    manager = _permission_manager(context)
+
+    if len(args) > 1:
         raise CommandError(
-            "Troca de modo ainda nao esta disponivel.",
-            hint="A etapa 04 implementara alteracao de modo e regras ativas.",
+            "Uso invalido.",
+            hint="Use /mode ou /mode <plan|default|accept_edits|trusted|locked>.",
         )
 
+    if args:
+        try:
+            mode = manager.set_mode(args[0])
+        except (ValueError, PermissionManagerError) as exc:
+            raise CommandError(
+                "Modo invalido.",
+                hint=f"Modos suportados: {', '.join(SUPPORTED_MODES)}.",
+            ) from exc
+        context.renderer.info(f"Modo ativo alterado para: {mode.value}")
+        return CommandResult(name="mode")
+
     rows = [
-        ("ativo", _active_mode(context.config)),
+        ("ativo", manager.mode.value),
         ("suportados", ", ".join(SUPPORTED_MODES)),
-        ("alteracao", "prevista para a etapa 04"),
+        ("alteracao", "/mode <modo>"),
     ]
     context.renderer.table("Modo", ("Campo", "Valor"), rows)
     return CommandResult(name="mode")
@@ -337,13 +399,99 @@ def _section(config: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _list_value(value: Any) -> list[str]:
+def _list_value(value: Any) -> list[Any]:
     if isinstance(value, list | tuple):
-        return [str(item) for item in value]
+        return list(value)
     if value is None:
         return []
-    return [str(value)]
+    return [value]
 
 
 def _git_dir(workspace: Path) -> Path:
     return workspace / ".git"
+
+
+def _permission_manager(context: CommandContext) -> PermissionManager:
+    return PermissionManager(
+        context.config,
+        audit_logger=context.audit_logger,
+        session_store=context.session_store,
+        session_id=context.session_id,
+    )
+
+
+def _permissions_add(
+    manager: PermissionManager,
+    args: Sequence[str],
+) -> str:
+    if len(args) < 3:
+        raise CommandError(
+            "Uso invalido.",
+            hint=(
+                "Use /permissions add <allow|ask|deny> <acao> [alvo]. "
+                f"Acoes: {', '.join(action.value for action in PermissionAction)}."
+            ),
+        )
+
+    effect = args[1].lower()
+    action = args[2].lower()
+    target = " ".join(args[3:]) if len(args) > 3 else "*"
+    try:
+        rule = manager.add_rule(effect, action, target)
+    except (ValueError, PermissionManagerError) as exc:
+        raise CommandError(
+            "Regra de permissao invalida.",
+            hint=(
+                "Use efeito allow, ask ou deny e uma acao valida: "
+                f"{', '.join(action.value for action in PermissionAction)}."
+            ),
+        ) from exc
+    return f"Regra adicionada: {rule.effect.value} {rule.action} {rule.target}"
+
+
+def _permissions_remove(
+    manager: PermissionManager,
+    args: Sequence[str],
+) -> str:
+    if len(args) != 3:
+        raise CommandError(
+            "Uso invalido.",
+            hint="Use /permissions remove <allow|ask|deny> <indice>.",
+        )
+
+    try:
+        position = int(args[2])
+    except ValueError as exc:
+        raise CommandError(
+            "Indice invalido.",
+            hint="Informe o indice numerico exibido em /permissions.",
+        ) from exc
+
+    try:
+        rule = manager.remove_rule(args[1].lower(), position)
+    except (ValueError, PermissionManagerError) as exc:
+        raise CommandError(
+            "Nao foi possivel remover a regra.",
+            hint=str(getattr(exc, "hint", None) or exc),
+        ) from exc
+    return f"Regra removida: {rule.effect.value} {rule.action} {rule.target}"
+
+
+def _permissions_clear(
+    manager: PermissionManager,
+    args: Sequence[str],
+) -> str:
+    if len(args) != 2:
+        raise CommandError(
+            "Uso invalido.",
+            hint="Use /permissions clear <allow|ask|deny>.",
+        )
+
+    try:
+        count = manager.clear_rules(args[1].lower())
+    except (ValueError, PermissionManagerError) as exc:
+        raise CommandError(
+            "Nao foi possivel limpar regras.",
+            hint=str(getattr(exc, "hint", None) or exc),
+        ) from exc
+    return f"Regras removidas: {count}"

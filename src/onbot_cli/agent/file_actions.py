@@ -35,7 +35,7 @@ class AgentFileAction:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AgentFileAction":
-        action_type = str(data.get("type", "")).strip()
+        action_type = str(data.get("type", data.get("action", ""))).strip()
         return cls(
             type=action_type,
             path=_optional_text(data.get("path")),
@@ -75,6 +75,14 @@ class AgentActionPlan:
             "response": self.response,
             "actions": [action.to_dict() for action in self.actions],
         }
+
+
+@dataclass(frozen=True, slots=True)
+class AgentActionPlanParseResult:
+    """Resultado do parsing de um bloco de acoes do agente."""
+
+    plan: AgentActionPlan | None = None
+    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,32 +320,50 @@ class FileActionExecutor:
         )
 
 
-def parse_action_plan(content: str) -> AgentActionPlan | None:
-    """Extrai plano de acoes de blocos JSON conhecidos."""
+def parse_action_plan_result(content: str) -> AgentActionPlanParseResult:
+    """Extrai plano de acoes ou erro de contrato de blocos JSON conhecidos."""
+
+    first_error: str | None = None
+    tagged_candidates = _onbot_action_candidates(content)
+    processed_candidates: set[str] = set()
+    for candidate in tagged_candidates:
+        processed_candidates.add(candidate)
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            if first_error is None:
+                first_error = _invalid_action_json_message(exc)
+            continue
+        result = _parse_action_plan_data(content, candidate, data)
+        if result.plan is not None:
+            return result
+        if result.error is not None and first_error is None:
+            first_error = result.error
 
     for candidate in _json_candidates(content):
+        if candidate in processed_candidates:
+            continue
         try:
             data = json.loads(candidate)
         except json.JSONDecodeError:
             continue
-        if isinstance(data, dict) and isinstance(data.get("actions"), list):
-            plan = AgentActionPlan.from_dict(data)
-            if plan.actions:
-                response = plan.response or _remove_candidate(content, candidate).strip()
-                return AgentActionPlan(response=response, actions=plan.actions)
-    return None
+        result = _parse_action_plan_data(content, candidate, data)
+        if result.plan is not None:
+            return result
+        if result.error is not None and first_error is None:
+            first_error = result.error
+    return AgentActionPlanParseResult(error=first_error)
+
+
+def parse_action_plan(content: str) -> AgentActionPlan | None:
+    """Extrai plano de acoes de blocos JSON conhecidos."""
+
+    return parse_action_plan_result(content).plan
 
 
 def _json_candidates(content: str) -> list[str]:
     candidates: list[str] = []
-    candidates.extend(
-        match.group(1).strip()
-        for match in re.finditer(
-            r"<onbot-actions>\s*(.*?)\s*</onbot-actions>",
-            content,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
-    )
+    candidates.extend(_onbot_action_candidates(content))
     candidates.extend(
         match.group(1).strip()
         for match in re.finditer(
@@ -350,6 +376,33 @@ def _json_candidates(content: str) -> list[str]:
     if stripped.startswith("{") and stripped.endswith("}"):
         candidates.append(stripped)
     return candidates
+
+
+def _onbot_action_candidates(content: str) -> list[str]:
+    return [
+        match.group(1).strip()
+        for match in re.finditer(
+            r"<onbot-actions>\s*(.*?)\s*</onbot-actions>",
+            content,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+    ]
+
+
+def _parse_action_plan_data(
+    content: str,
+    candidate: str,
+    data: Any,
+) -> AgentActionPlanParseResult:
+    if not isinstance(data, dict) or not isinstance(data.get("actions"), list):
+        return AgentActionPlanParseResult()
+    plan = AgentActionPlan.from_dict(data)
+    if plan.actions:
+        response = plan.response or _remove_candidate(content, candidate).strip()
+        return AgentActionPlanParseResult(
+            plan=AgentActionPlan(response=response, actions=plan.actions)
+        )
+    return AgentActionPlanParseResult(error=_invalid_action_plan_message(data))
 
 
 def _remove_candidate(content: str, candidate: str) -> str:
@@ -365,6 +418,33 @@ def _write_changes(plan: AgentActionPlan) -> dict[str, str]:
             continue
         changes[action.path] = action.content
     return changes
+
+
+def _invalid_action_plan_message(data: dict[str, Any]) -> str:
+    raw_actions = data.get("actions", [])
+    received_types: list[str] = []
+    if isinstance(raw_actions, list):
+        for item in raw_actions:
+            if not isinstance(item, dict):
+                received_types.append("<item-nao-objeto>")
+                continue
+            action_type = str(item.get("type", item.get("action", ""))).strip()
+            received_types.append(action_type or "<type-ausente>")
+    details = ", ".join(received_types) if received_types else "nenhuma action"
+    return (
+        "O modelo retornou um bloco de acoes, mas nenhuma acao valida foi "
+        "encontrada. Cada item de `actions` deve usar `type` com um destes "
+        "valores: create_file, write_file, edit_file, move_file ou delete_file. "
+        f"Tipos recebidos: {details}."
+    )
+
+
+def _invalid_action_json_message(error: json.JSONDecodeError) -> str:
+    return (
+        "O modelo retornou um bloco <onbot-actions>, mas o JSON interno e "
+        "invalido. Nenhuma alteracao foi aplicada. "
+        f"Erro: {error.msg} na linha {error.lineno}, coluna {error.colno}."
+    )
 
 
 def _optional_text(value: Any) -> str | None:

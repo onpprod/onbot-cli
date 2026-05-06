@@ -14,7 +14,7 @@ from onbot_cli.agent.file_actions import (
     FileActionApplyResult,
     FileActionExecutor,
     StaticApprovalService,
-    parse_action_plan,
+    parse_action_plan_result,
 )
 from onbot_cli.agent.messages import AgentMessage
 from onbot_cli.agent.planner import Plan, Planner
@@ -83,6 +83,7 @@ class LLMTurnOutput:
     content: str
     streamed: bool = False
     action_plan: AgentActionPlan | None = None
+    action_parse_error: str | None = None
 
 
 StreamCallback = Callable[[str], None]
@@ -255,6 +256,9 @@ class AgentController:
                     self._file_action_executor().preview(llm_output.action_plan),
                 )
                 status = AgentTurnStatus.AWAITING_CONFIRMATION.value
+            elif llm_output.action_parse_error is not None:
+                content = llm_output.content
+                status = AgentTurnStatus.FAILED.value
             else:
                 content = llm_output.content
                 status = AgentTurnStatus.COMPLETED.value
@@ -350,10 +354,18 @@ class AgentController:
         if not content:
             response = client.complete(request)
             content = response.content
-        action_plan = parse_action_plan(content)
+        action_parse_result = parse_action_plan_result(content)
+        action_plan = action_parse_result.plan
         if action_plan is None:
-            content = _ground_unapplied_mutation_claims(content)
-            if stream_callback is not None and content:
+            if action_parse_result.error is not None:
+                content = action_parse_result.error
+            else:
+                content = _ground_unapplied_mutation_claims(content)
+            if (
+                action_parse_result.error is None
+                and stream_callback is not None
+                and content
+            ):
                 for chunk in chunks or [content]:
                     stream_callback(chunk)
         else:
@@ -367,10 +379,16 @@ class AgentController:
                 "streamed": streamed,
                 "content_chars": len(content),
                 "action_count": 0 if action_plan is None else len(action_plan.actions),
+                "action_parse_error": action_parse_result.error is not None,
             },
             session_id=self.session_id,
         )
-        return LLMTurnOutput(content, streamed, action_plan)
+        return LLMTurnOutput(
+            content,
+            streamed,
+            action_plan,
+            action_parse_result.error,
+        )
 
     def _handle_pending_response(
         self,
@@ -628,10 +646,12 @@ def _messages_for(
             "Responda em portugues, respeite permissoes, nao invente execucoes "
             "e nunca exponha segredos deliberadamente. Para criar, editar, mover "
             "ou excluir arquivos, retorne somente um bloco <onbot-actions> com "
-            "JSON no formato {\"response\": \"resumo\", \"actions\": [...]}. "
-            "Use actions create_file, write_file, edit_file, move_file ou "
-            "delete_file. Para escrita, envie sempre o conteudo completo do "
-            "arquivo em content. Nunca afirme que a alteracao ja foi aplicada; "
+            "JSON no formato {\"response\":\"resumo\",\"actions\":[{\"type\":"
+            "\"create_file\",\"path\":\"main.html\",\"content\":\"...\"}]}. "
+            "Cada item em actions deve usar a chave type com um destes valores: "
+            "create_file, write_file, edit_file, move_file ou delete_file. "
+            "Para escrita, envie sempre o conteudo completo do arquivo em "
+            "content. Nunca afirme que a alteracao ja foi aplicada; "
             "o sistema pedira confirmacao e aplicara a acao real."
         ),
         AgentMessage.system(

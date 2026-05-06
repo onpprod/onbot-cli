@@ -283,6 +283,90 @@ def test_agent_controller_creates_pending_file_action_and_applies_after_yes(
     assert target.read_text(encoding="utf-8") == "<!doctype html>\n<title>Portfolio</title>\n"
     assert session_after_apply.pending_interactions[-1]["status"] == "completed"
     assert "create_file" in applied.content or "write_file" in applied.content
+    system_prompt = fake_llm.requests[0].messages[0]["content"]
+    assert '"type":"create_file"' in system_prompt
+    assert "Cada item em actions deve usar a chave type" in system_prompt
+
+
+def test_agent_controller_accepts_action_alias_from_llm_file_action(
+    tmp_path: Path,
+) -> None:
+    action_payload = {
+        "response": "Vou criar o arquivo solicitado apos sua confirmacao.",
+        "actions": [
+            {
+                "action": "create_file",
+                "path": "main.html",
+                "content": "<!doctype html>\n<title>Pagina Principal</title>\n",
+            }
+        ],
+    }
+    bootstrap = bootstrap_application(tmp_path)
+    fake_llm = FakeLLM(
+        [f"<onbot-actions>{json.dumps(action_payload)}</onbot-actions>"]
+    )
+    controller = AgentController.from_bootstrap(bootstrap, llm_client=fake_llm)
+
+    proposed = controller.run("crie main.html")
+    applied = controller.run("sim")
+
+    assert proposed.status == "awaiting_confirmation"
+    assert "main.html" in proposed.content
+    assert applied.status == "completed"
+    assert (tmp_path / "main.html").read_text(encoding="utf-8") == (
+        "<!doctype html>\n<title>Pagina Principal</title>\n"
+    )
+
+
+def test_agent_controller_reports_invalid_file_action_contract(
+    tmp_path: Path,
+) -> None:
+    action_payload = {
+        "response": "Vou executar a acao.",
+        "actions": [
+            {
+                "type": "make_file",
+                "path": "main.html",
+                "content": "<!doctype html>\n",
+            }
+        ],
+    }
+    bootstrap = bootstrap_application(tmp_path)
+    fake_llm = FakeLLM(
+        [f"<onbot-actions>{json.dumps(action_payload)}</onbot-actions>"]
+    )
+    controller = AgentController.from_bootstrap(bootstrap, llm_client=fake_llm)
+
+    result = controller.run("crie main.html")
+    session = SessionStore(bootstrap.layout).load(bootstrap.session_id)
+
+    assert result.status == "failed"
+    assert "nenhuma acao valida" in result.content
+    assert "make_file" in result.content
+    assert not (tmp_path / "main.html").exists()
+    assert session.pending_interactions == []
+
+
+def test_agent_controller_reports_malformed_onbot_actions_json(
+    tmp_path: Path,
+) -> None:
+    malformed_payload = (
+        '<onbot-actions>{"response":"Criando arquivo.",'
+        '"actions":[{"type":"create_file","path":"broken.txt","content":"ok"}]'
+        "</onbot-actions>"
+    )
+    bootstrap = bootstrap_application(tmp_path)
+    fake_llm = FakeLLM([malformed_payload])
+    controller = AgentController.from_bootstrap(bootstrap, llm_client=fake_llm)
+
+    result = controller.run("crie broken.txt")
+    session = SessionStore(bootstrap.layout).load(bootstrap.session_id)
+
+    assert result.status == "failed"
+    assert "JSON interno e invalido" in result.content
+    assert "Nenhuma alteracao foi aplicada" in result.content
+    assert not (tmp_path / "broken.txt").exists()
+    assert session.pending_interactions == []
 
 
 def test_agent_controller_can_edit_move_and_delete_real_files_after_confirmation(
